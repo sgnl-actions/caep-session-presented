@@ -1,96 +1,128 @@
+import { transmitSET } from '@sgnl-ai/set-transmitter';
+import { signSET, getBaseURL, getAuthorizationHeader, SGNL_USER_AGENT } from '@sgnl-actions/utils';
+
+// Event type constant
+const SESSION_PRESENTED_EVENT = 'https://schemas.openid.net/secevent/caep/event-type/session-presented';
+
 /**
- * SGNL Job Template
- *
- * This template provides a starting point for implementing SGNL jobs.
- * Replace this implementation with your specific business logic.
+ * Parse subject JSON string
  */
+function parseSubject(subjectStr) {
+  try {
+    return JSON.parse(subjectStr);
+  } catch (error) {
+    throw new Error(`Invalid subject JSON: ${error.message}`, { cause: error });
+  }
+}
+
+/**
+ * Parse reason - auto-wraps plain strings as i18n objects per CAEP spec.
+ * If input is a JSON object, use it directly. If plain string, wrap as {"en": value}.
+ */
+function parseReason(reasonStr) {
+  if (!reasonStr) return undefined;
+
+  try {
+    const parsed = JSON.parse(reasonStr);
+    if (typeof parsed === 'object' && parsed !== null) {
+      return parsed;
+    }
+  } catch {
+    // Not JSON - fall through to auto-wrap
+  }
+
+  return { en: reasonStr };
+}
 
 export default {
   /**
-   * Main execution handler - implement your job logic here
+   * Main execution handler - transmits a CAEP Session Presented event as a Security Event Token
+   *
    * @param {Object} params - Job input parameters
-   * @param {Object} context - Execution context with env, secrets, outputs
-   * @returns {Object} Job results
+   * @param {string} params.subject - Subject identifier JSON
+   * @param {string} params.audience - Intended recipient of the SET
+   * @param {string} [params.fp_ua] - User agent fingerprint
+   * @param {string} [params.ext_id] - External session identifier
+   * @param {string} [params.event_timestamp] - Unix timestamp (seconds) when the event occurred
+   * @param {string} [params.initiating_entity] - Entity that initiated the event (admin, user, policy, system)
+   * @param {string} [params.reason_admin] - Admin-readable reason (JSON i18n object or plain string)
+   * @param {string} [params.reason_user] - User-readable reason (JSON i18n object or plain string)
+   * @param {string} [params.address] - Optional destination URL override
+   * @param {Object} context - Execution context with secrets, environment, and crypto
+   * @returns {Object} Transmission result with status, statusCode, body, and retryable flag
    */
   invoke: async (params, context) => {
-    console.log('Starting job execution');
-    console.log(`Processing target: ${params.target}`);
-    console.log(`Action: ${params.action}`);
 
-    // TODO: Replace with your implementation
-    const { target, action, options = [], dry_run = false } = params;
+    const address = getBaseURL(params, context);
+    const authHeader = await getAuthorizationHeader(context);
 
-    if (dry_run) {
-      console.log('DRY RUN: No changes will be made');
-    }
+    // Parse parameters
+    const subject = parseSubject(params.subject);
 
-    // Access environment variables
-    const environment = context.env.ENVIRONMENT || 'development';
-    console.log(`Running in ${environment} environment`);
-
-    // Access secrets securely (example)
-    if (context.secrets.API_KEY) {
-      console.log(`Using API key ending in ...${context.secrets.API_KEY.slice(-4)}`);
-    }
-
-    // Use outputs from previous jobs in workflow
-    if (context.outputs && Object.keys(context.outputs).length > 0) {
-      console.log(`Available outputs from ${Object.keys(context.outputs).length} previous jobs`);
-      console.log(`Previous job outputs: ${Object.keys(context.outputs).join(', ')}`);
-    }
-
-    // TODO: Implement your business logic here
-    console.log(`Performing ${action} on ${target}...`);
-
-    if (options.length > 0) {
-      console.log(`Processing ${options.length} options: ${options.join(', ')}`);
-    }
-
-    console.log(`Successfully completed ${action} on ${target}`);
-
-    // Return structured results matching metadata.yaml outputs
-    return {
-      status: dry_run ? 'dry_run_completed' : 'success',
-      target,
-      processed_at: new Date().toISOString()
+    // Build event payload
+    const eventPayload = {
+      event_timestamp: params.event_timestamp
+        ? parseInt(params.event_timestamp, 10)
+        : Math.floor(Date.now() / 1000)
     };
+
+    // Add optional event claims
+    if (params.fp_ua) {
+      eventPayload.fp_ua = params.fp_ua;
+    }
+    if (params.ext_id) {
+      eventPayload.ext_id = params.ext_id;
+    }
+    if (params.initiating_entity) {
+      eventPayload.initiating_entity = params.initiating_entity;
+    }
+    if (params.reason_admin) {
+      eventPayload.reason_admin = parseReason(params.reason_admin);
+    }
+    if (params.reason_user) {
+      eventPayload.reason_user = parseReason(params.reason_user);
+    }
+
+    // Build the SET payload (reserved claims will be added during signing)
+    const setPayload = {
+      aud: params.audience,
+      sub_id: subject,
+      events: {
+        [SESSION_PRESENTED_EVENT]: eventPayload
+      }
+    };
+
+    const jwt = await signSET(context, setPayload);
+
+    // Transmit the SET
+    return await transmitSET(jwt, address, {
+      headers: {
+        'Authorization': authHeader,
+        'User-Agent': SGNL_USER_AGENT
+      }
+    });
   },
 
   /**
-   * Error recovery handler - implement error handling logic
-   * @param {Object} params - Original params plus error information
-   * @param {Object} context - Execution context
-   * @returns {Object} Recovery results
+   * Error handler for retryable failures
    */
   error: async (params, _context) => {
-    const { error, target } = params;
-    console.error(`Job encountered error while processing ${target}: ${error.message}`);
+    const { error } = params;
 
-    // TODO: Implement your error recovery logic
-    // Example: Check if error is retryable and attempt recovery
+    if (error.message?.includes('429') ||
+        error.message?.includes('502') ||
+        error.message?.includes('503') ||
+        error.message?.includes('504')) {
+      return { status: 'retry_requested' };
+    }
 
-    // For now, just throw the error - implement your logic here
-    throw new Error(`Unable to recover from error: ${error.message}`);
+    throw error;
   },
 
   /**
-   * Graceful shutdown handler - implement cleanup logic
-   * @param {Object} params - Original params plus halt reason
-   * @param {Object} context - Execution context
-   * @returns {Object} Cleanup results
+   * Cleanup handler
    */
-  halt: async (params, _context) => {
-    const { reason, target } = params;
-    console.log(`Job is being halted (${reason}) while processing ${target}`);
-
-    // TODO: Implement your cleanup logic
-    // Example: Save partial results, close connections, etc.
-
-    return {
-      status: 'halted',
-      target: target || 'unknown',
-      reason: reason,
-      halted_at: new Date().toISOString()
-    };
+  halt: async (_params, _context) => {
+    return { status: 'halted' };
   }
 };

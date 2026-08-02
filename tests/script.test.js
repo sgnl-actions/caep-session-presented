@@ -1,124 +1,213 @@
-import script from '../src/script.mjs';
+const { jest } = import.meta;
 
-describe('Job Template Script', () => {
+// Mock dependencies before importing the script
+jest.unstable_mockModule('@sgnl-ai/set-transmitter', () => ({
+  transmitSET: jest.fn()
+}));
+
+jest.unstable_mockModule('@sgnl-actions/utils', () => ({
+  signSET: jest.fn(),
+  getBaseURL: jest.fn(),
+  getAuthorizationHeader: jest.fn(),
+  SGNL_USER_AGENT: 'SGNL-CAEP-Hub/2.0'
+}));
+
+const { transmitSET } = await import('@sgnl-ai/set-transmitter');
+const { signSET, getBaseURL, getAuthorizationHeader } = await import('@sgnl-actions/utils');
+const script = (await import('../src/script.mjs')).default;
+
+describe('CAEP Session Presented Transmitter', () => {
   const mockContext = {
-    env: {
-      ENVIRONMENT: 'test'
+    environment: {
+      ADDRESS: 'https://receiver.example.com/.well-known/ssf'
     },
     secrets: {
-      API_KEY: 'test-api-key-123456'
+      BEARER_AUTH_TOKEN: 'test-token'
     },
-    outputs: {},
-    partial_results: {},
-    current_step: 'start'
+    crypto: {
+      signJWT: jest.fn()
+    }
   };
 
-  describe('invoke handler', () => {
-    test('should execute successfully with minimal params', async () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    getBaseURL.mockReturnValue('https://receiver.example.com/.well-known/ssf');
+    getAuthorizationHeader.mockResolvedValue('Bearer test-token');
+    signSET.mockResolvedValue('signed-jwt-token');
+    transmitSET.mockResolvedValue({
+      status: 'success',
+      statusCode: 202,
+      body: '',
+      retryable: false
+    });
+  });
+
+  describe('invoke', () => {
+    test('should transmit session presented with required fields only', async () => {
       const params = {
-        target: 'test-user@example.com',
-        action: 'create'
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com'
       };
 
       const result = await script.invoke(params, mockContext);
 
       expect(result.status).toBe('success');
-      expect(result.target).toBe('test-user@example.com');
-      expect(result.processed_at).toBeDefined();
+      expect(result.statusCode).toBe(202);
+
+      const setPayload = signSET.mock.calls[0][1];
+      expect(setPayload.aud).toBe('https://receiver.example.com');
+      expect(setPayload.sub_id).toEqual({ format: 'email', email: 'user@example.com' });
+
+      const eventPayload = setPayload.events['https://schemas.openid.net/secevent/caep/event-type/session-presented'];
+      expect(eventPayload.event_timestamp).toBeDefined();
     });
 
-    test('should handle dry run mode', async () => {
+    test('should include all optional fields when provided', async () => {
       const params = {
-        target: 'test-user@example.com',
-        action: 'delete',
-        dry_run: true
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com',
+        fp_ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+        ext_id: 'federated-session-xyz789',
+        initiating_entity: 'system',
+        reason_admin: '{"en":"Session heartbeat received"}',
+        reason_user: 'Session active'
       };
 
-      const result = await script.invoke(params, mockContext);
+      await script.invoke(params, mockContext);
 
-      expect(result.status).toBe('dry_run_completed');
-      expect(result.target).toBe('test-user@example.com');
+      const setPayload = signSET.mock.calls[0][1];
+      const eventPayload = setPayload.events['https://schemas.openid.net/secevent/caep/event-type/session-presented'];
+
+      expect(eventPayload.fp_ua).toBe('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)');
+      expect(eventPayload.ext_id).toBe('federated-session-xyz789');
+      expect(eventPayload.initiating_entity).toBe('system');
+      expect(eventPayload.reason_admin).toEqual({ en: 'Session heartbeat received' });
+      expect(eventPayload.reason_user).toEqual({ en: 'Session active' });
     });
 
-    test('should process options array', async () => {
+    test('should auto-wrap plain string reason_admin as i18n object', async () => {
       const params = {
-        target: 'test-group',
-        action: 'update',
-        options: ['force', 'notify', 'audit']
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com',
+        reason_admin: 'Periodic session liveness check'
       };
 
-      const result = await script.invoke(params, mockContext);
+      await script.invoke(params, mockContext);
 
-      expect(result.status).toBe('success');
-      expect(result.target).toBe('test-group');
+      const setPayload = signSET.mock.calls[0][1];
+      const eventPayload = setPayload.events['https://schemas.openid.net/secevent/caep/event-type/session-presented'];
+
+      expect(eventPayload.reason_admin).toEqual({ en: 'Periodic session liveness check' });
     });
 
-    test('should handle context with previous job outputs', async () => {
-      const contextWithOutputs = {
-        ...mockContext,
-        outputs: {
-          'create-user': {
-            user_id: '12345',
-            created_at: '2024-01-15T10:30:00Z'
-          },
-          'assign-groups': {
-            groups_assigned: 3
-          }
-        }
-      };
-
+    test('should pass through JSON i18n object for reason_user', async () => {
       const params = {
-        target: 'user-12345',
-        action: 'finalize'
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com',
+        reason_user: '{"en":"Session verified","ja":"セッション確認済み"}'
       };
 
-      const result = await script.invoke(params, contextWithOutputs);
+      await script.invoke(params, mockContext);
 
-      expect(result.status).toBe('success');
-      expect(result.target).toBe('user-12345');
+      const setPayload = signSET.mock.calls[0][1];
+      const eventPayload = setPayload.events['https://schemas.openid.net/secevent/caep/event-type/session-presented'];
+
+      expect(eventPayload.reason_user).toEqual({ en: 'Session verified', ja: 'セッション確認済み' });
+    });
+
+    test('should use custom event_timestamp when provided', async () => {
+      const params = {
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com',
+        event_timestamp: '1700000000'
+      };
+
+      await script.invoke(params, mockContext);
+
+      const setPayload = signSET.mock.calls[0][1];
+      const eventPayload = setPayload.events['https://schemas.openid.net/secevent/caep/event-type/session-presented'];
+
+      expect(eventPayload.event_timestamp).toBe(1700000000);
+    });
+
+    test('should throw on invalid subject JSON', async () => {
+      const params = {
+        subject: 'not valid json',
+        audience: 'https://receiver.example.com'
+      };
+
+      await expect(script.invoke(params, mockContext)).rejects.toThrow('Invalid subject JSON');
+    });
+
+    test('should use address param for URL override', async () => {
+      const params = {
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com',
+        address: 'https://custom-url.example.com/events'
+      };
+
+      await script.invoke(params, mockContext);
+
+      expect(getBaseURL).toHaveBeenCalledWith(params, mockContext);
+    });
+
+    test('should pass auth header to transmitSET', async () => {
+      const params = {
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com'
+      };
+
+      await script.invoke(params, mockContext);
+
+      expect(getAuthorizationHeader).toHaveBeenCalledWith(mockContext);
+      expect(transmitSET).toHaveBeenCalledWith(
+        'signed-jwt-token',
+        'https://receiver.example.com/.well-known/ssf',
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            'Authorization': 'Bearer test-token',
+            'User-Agent': 'SGNL-CAEP-Hub/2.0'
+          })
+        })
+      );
     });
   });
 
   describe('error handler', () => {
-    test('should throw error by default', async () => {
-      const params = {
-        target: 'test-user@example.com',
-        action: 'create',
-        error: {
-          message: 'Something went wrong',
-          code: 'ERROR_CODE'
-        }
-      };
+    test('should return retry_requested for 429', async () => {
+      const params = { error: { message: 'HTTP 429 Too Many Requests' } };
+      const result = await script.error(params, mockContext);
+      expect(result.status).toBe('retry_requested');
+    });
 
-      await expect(script.error(params, mockContext)).rejects.toThrow('Unable to recover from error: Something went wrong');
+    test('should return retry_requested for 502', async () => {
+      const params = { error: { message: 'HTTP 502 Bad Gateway' } };
+      const result = await script.error(params, mockContext);
+      expect(result.status).toBe('retry_requested');
+    });
+
+    test('should return retry_requested for 503', async () => {
+      const params = { error: { message: 'HTTP 503 Service Unavailable' } };
+      const result = await script.error(params, mockContext);
+      expect(result.status).toBe('retry_requested');
+    });
+
+    test('should return retry_requested for 504', async () => {
+      const params = { error: { message: 'HTTP 504 Gateway Timeout' } };
+      const result = await script.error(params, mockContext);
+      expect(result.status).toBe('retry_requested');
+    });
+
+    test('should re-throw non-retryable errors', async () => {
+      const params = { error: { message: 'HTTP 400 Bad Request' } };
+      await expect(script.error(params, mockContext)).rejects.toEqual({ message: 'HTTP 400 Bad Request' });
     });
   });
 
   describe('halt handler', () => {
-    test('should handle graceful shutdown', async () => {
-      const params = {
-        target: 'test-user@example.com',
-        reason: 'timeout'
-      };
-
-      const result = await script.halt(params, mockContext);
-
+    test('should return halted status', async () => {
+      const result = await script.halt({}, mockContext);
       expect(result.status).toBe('halted');
-      expect(result.target).toBe('test-user@example.com');
-      expect(result.reason).toBe('timeout');
-      expect(result.halted_at).toBeDefined();
-    });
-
-    test('should handle halt without target', async () => {
-      const params = {
-        reason: 'system_shutdown'
-      };
-
-      const result = await script.halt(params, mockContext);
-
-      expect(result.status).toBe('halted');
-      expect(result.target).toBe('unknown');
-      expect(result.reason).toBe('system_shutdown');
     });
   });
 });
