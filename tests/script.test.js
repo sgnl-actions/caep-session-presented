@@ -130,6 +130,67 @@ describe('CAEP Session Presented Transmitter', () => {
       expect(eventPayload.event_timestamp).toBe(1700000000);
     });
 
+    test('should default event_timestamp to current time when not provided', async () => {
+      const params = {
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com'
+      };
+
+      const before = Math.floor(Date.now() / 1000);
+      await script.invoke(params, mockContext);
+      const after = Math.floor(Date.now() / 1000);
+
+      const setPayload = signSET.mock.calls[0][1];
+      const eventPayload = setPayload.events['https://schemas.openid.net/secevent/caep/event-type/session-presented'];
+      expect(eventPayload.event_timestamp).toBeGreaterThanOrEqual(before);
+      expect(eventPayload.event_timestamp).toBeLessThanOrEqual(after);
+    });
+
+    test('should not include reason fields when not provided', async () => {
+      const params = {
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com'
+      };
+
+      await script.invoke(params, mockContext);
+
+      const setPayload = signSET.mock.calls[0][1];
+      const eventPayload = setPayload.events['https://schemas.openid.net/secevent/caep/event-type/session-presented'];
+      expect(eventPayload.reason_admin).toBeUndefined();
+      expect(eventPayload.reason_user).toBeUndefined();
+    });
+
+    test('should handle non-retryable HTTP errors from transmitSET', async () => {
+      transmitSET.mockResolvedValue({
+        status: 'failed',
+        statusCode: 400,
+        body: '{"error":"Invalid request"}',
+        retryable: false
+      });
+
+      const params = {
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com'
+      };
+
+      const result = await script.invoke(params, mockContext);
+
+      expect(result.status).toBe('failed');
+      expect(result.statusCode).toBe(400);
+      expect(result.retryable).toBe(false);
+    });
+
+    test('should use ADDRESS from environment when address not provided', async () => {
+      const params = {
+        subject: '{"format":"email","email":"user@example.com"}',
+        audience: 'https://receiver.example.com'
+      };
+
+      await script.invoke(params, mockContext);
+
+      expect(getBaseURL).toHaveBeenCalledWith(params, mockContext);
+    });
+
     test('should throw on invalid subject JSON', async () => {
       const params = {
         subject: 'not valid json',
