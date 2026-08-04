@@ -1,49 +1,145 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/sgnl-actions/schemas/main/metadata.schema.json
-name: job-template
-description: Template for SGNL JavaScript jobs - replace with your job description
+name: caep-session-presented
+description: Transmits a Continuous Access Evaluation Protocol (CAEP) Session Presented event as a Security Event Token (SET) to a specified endpoint
 
-# Input parameters for web form generation
 inputs:
-  target:
+  subject:
     type: text
-    description: Target resource identifier (e.g., user email, group ID)
+    description: Subject identifier JSON (e.g., {"format":"email","email":"user@example.com"})
     required: true
     validation:
       min: 1
+      max: 2000
+
+  audience:
+    type: text
+    description: Intended recipient of the SET (e.g., https://customer.okta.com/)
+    required: true
+    validation:
+      min: 1
+      max: 500
+
+  fp_ua:
+    type: text
+    description: User agent fingerprint for the session
+    required: false
+    validation:
+      max: 1000
+
+  ext_id:
+    type: text
+    description: External session identifier (opaque string from the IdP)
+    required: false
+    validation:
+      max: 500
+
+  event_timestamp:
+    type: text
+    description: Unix timestamp (seconds) when the session was presented. Defaults to current time.
+    required: false
+    validation:
+      max: 20
+
+  initiating_entity:
+    type: text
+    description: Entity that initiated the event (admin, user, policy, system)
+    required: false
+    validation:
       max: 100
 
-  action:
+  reason_admin:
     type: text
-    description: Action to perform on the target resource
-    required: true
+    description: Admin-readable reason (JSON i18n object e.g. {"en":"message"} or plain string auto-wrapped)
+    required: false
+    validation:
+      max: 1000
+
+  reason_user:
+    type: text
+    description: User-readable reason (JSON i18n object e.g. {"en":"message"} or plain string auto-wrapped)
+    required: false
+    validation:
+      max: 1000
+
+  address:
+    type: text
+    description: Optional destination URL override (defaults to ADDRESS environment variable)
+    required: false
     validation:
       min: 1
-      max: 50
+      max: 500
 
-  options:
-    type: array
-    description: Additional options for the operation
-    required: false
-    item_type: text
-    validation:
-      max: 10
-
-  dry_run:
-    type: boolean
-    description: Preview changes without executing them
-    required: false
-    default: false
-
-# Expected output structure
 outputs:
   status:
     type: text
-    description: Operation result (success, failed, recovered, etc.)
+    description: Transmission status ('success' or 'failed')
 
-  target:
+  statusCode:
+    type: number
+    description: HTTP response status code
+
+  body:
     type: text
-    description: The target resource that was processed
+    description: HTTP response body
 
-  processed_at:
-    type: datetime
-    description: When the operation completed (ISO 8601)
+  retryable:
+    type: boolean
+    description: Whether the error is retryable (for failed requests)
+
+environment:
+  ADDRESS:
+    type: text
+    description: Base URL for the API
+    required: false
+  OAUTH2_CLIENT_CREDENTIALS_AUDIENCE:
+    type: text
+    description: OAuth2 client credentials audience
+    required: false
+  OAUTH2_CLIENT_CREDENTIALS_AUTH_STYLE:
+    type: text
+    description: OAuth2 client credentials auth style
+    required: false
+  OAUTH2_CLIENT_CREDENTIALS_CLIENT_ID:
+    type: text
+    description: OAuth2 client credentials client ID
+    required: false
+  OAUTH2_CLIENT_CREDENTIALS_SCOPE:
+    type: text
+    description: OAuth2 client credentials scope
+    required: false
+  OAUTH2_CLIENT_CREDENTIALS_TOKEN_URL:
+    type: text
+    description: OAuth2 client credentials token URL
+    required: false
+
+secrets:
+  BEARER_AUTH_TOKEN:
+    type: text
+    description: Bearer auth token
+    required: false
+  BASIC_USERNAME:
+    type: text
+    description: Basic auth username
+    required: false
+  BASIC_PASSWORD:
+    type: text
+    description: Basic auth password
+    required: false
+  OAUTH2_CLIENT_CREDENTIALS_CLIENT_SECRET:
+    type: text
+    description: OAuth2 client secret
+    required: false
+  OAUTH2_AUTHORIZATION_CODE_ACCESS_TOKEN:
+    type: text
+    description: OAuth2 authorization code access token
+    required: false
+
+optional_one_of:
+  - ["secrets.BEARER_AUTH_TOKEN"]
+  - ["secrets.BASIC_USERNAME", "secrets.BASIC_PASSWORD"]
+  - [
+      "secrets.OAUTH2_CLIENT_CREDENTIALS_CLIENT_SECRET",
+      "environment.OAUTH2_CLIENT_CREDENTIALS_CLIENT_ID",
+      "environment.OAUTH2_CLIENT_CREDENTIALS_TOKEN_URL",
+    ]
+  - ["secrets.OAUTH2_AUTHORIZATION_CODE_ACCESS_TOKEN"]
